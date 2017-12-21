@@ -1,0 +1,196 @@
+---
+title: "Prediction Assignment Writeup"
+author: "Enrique Ripoll"
+date: "19th December 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(caret)
+library(ggplot2)
+```
+
+## Summary
+
+People regularly quantify *how much* of a particular activity they do, but they rarely quantify *how well*
+they do it. Using data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants,
+the goal of this project is to predict the manner in which they did the Unilateral Dumbbell Biceps Curl
+excercise.
+
+
+## Loading the data
+
+As first step, we should download the data and load the data sets into R
+
+```{r}
+setwd("C:/Users/daiko/Documents/DATA_SCIENCE/000_Coursera/Course_8");
+
+urltrain <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+urltest <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+fnametrain <- "./pml-training.csv"
+fnametest <- "./pml-testing.csv"
+
+if(!file.exists(fnametrain))   download.file(urltrain, destfile = fnametrain);
+if(!file.exists(fnametest))    download.file(urltest, destfile = fnametest);
+
+dtrain0 <- read.csv (fnametrain)
+dtest0 <- read.csv (fnametest)
+```
+
+## Preprocessing
+
+If we take a look to the (train) data set, the outcome is the variable *classe*, which is a factor variable
+that classifies the excersice in five different fashions: exactly according to the specification (Class A),
+throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the
+dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+The data set contains 160 variables. However, the variables [1,3,4,5,6,7] are irrelevant as predictors
+and there are also some variables with NA values. So we are going to remove this variables in order to 
+clean the data.
+
+```{r}
+dtrain <- dtrain0[,-c(1,3,4,5,6,7)]
+dtrain <- dtrain[, colSums(is.na(dtrain)) == 0]
+dtrain <- dtrain[,-which(sapply(dtrain, class) == "factor")] #Eliminate columns coded as factor
+#re-including two removed factor variables that we need to use
+dtrain$user_name <- dtrain0$user_name
+dtrain$classe <- dtrain0$classe
+```
+
+## Machine Learning
+
+### Data splitting and cross-validation
+
+We are going to split the training set in two subsets: the subtraining set and the subtesting set. 
+This will allow us to cross-validate the model, building a model on the subtraining test, evaluating
+on the subtesting set and repeating and averaging the estimated errors.
+
+```{r}
+set.seed(112)
+inTrain <- createDataPartition(y=dtrain$classe, p=0.7)[[1]]
+dsubtrain <- dtrain[inTrain,]
+dsubtest <- dtrain[-inTrain,]
+```
+
+
+```{r}
+control <- trainControl(method = "cv", number = 6)
+```
+
+### Training the model
+Since this is mainly a classification project, we are going to use *boosting* and *rain forest* as 
+learning methods, and compare the results
+
+*Boosting* was a procedure that combines the outputs of many "weak" classifiers to produce a powerful
+"committee". We control the tuning parameters with the function "expand.grid"
+
+```{r, include=FALSE}
+# For a gradient boosting machine (GBM) model, there are three main tuning parameters:
+      # number of iterations, i.e. trees, (called n.trees in the gbm function)
+      # complexity of the tree, called interaction.depth
+      # learning rate: how quickly the algorithm adapts, called shrinkage
+      # the minimum number of training set samples in a node to commence splitting (n.minobsinnode)
+```
+
+```{r}
+set.seed(112)
+modelgrid <- expand.grid (interaction.depth = round(sqrt(NCOL(dsubtrain))),
+                         n.trees = c(50, 100, 200),
+                         shrinkage = 0.1,
+                         n.minobsinnode = c(10,20))
+
+modelBoost <- train (classe ~ ., data=dsubtrain, method="gbm", verbose=FALSE,
+              preProc = c("center", "scale"),
+              trControl=control,
+              tuneGrid = modelgrid)
+modelBoost$results
+```
+
+*Random forest* are also a procedure for classification and operate by constructing a multitude of
+decision trees at training time and outputting the class that is the mode of the classes
+
+```{r, include=FALSE}
+# There are many other parameters, but {mtry} and {ntree} parameters are perhaps the most likely to
+# have the biggest effect on the final accuracy.
+# mtry: Number of variables randomly sampled as candidates at each split.
+# ntree: Number of trees to grow (not available in caret package)
+```
+
+```{r}
+set.seed(112)
+modelgrid2 <- expand.grid(.mtry=c(5,10,15,20))
+modelForest <- train(classe ~ ., data=dsubtrain, method="rf",
+                   preProc = c("center", "scale"),
+                   trControl=control,
+                   tuneGrid = modelgrid2)
+modelForest$results
+```
+
+### Results
+
+In order to obtain the out-sample error we use the Confussion Matrix, that compare the truth values
+of the subtesting set (that we have still not use) with the predictions, for both boosting and rain 
+forest methods
+
+```{r}
+CMBoost <- confusionMatrix(dsubtest$classe, predict(modelBoost, dsubtest))
+CMForest <- confusionMatrix(dsubtest$classe, predict(modelForest, dsubtest))
+```
+
+The test accuracy  is `r CMBoost$overall[1]` for boosting model and `r CMForest$overall[1]` for rain
+forest model. Let's see what are the most important variable in both models:
+
+Rain Forest model:
+```{r}
+varImp(modelForest)
+```
+
+Boosting model:
+```{r}
+head(summary(modelBoost$finalModel),10)
+```
+
+As we could see, both models aggre wiht the most relevant variables, as expected. Let's plot the 
+outcome versus the two main predictors (roll_belt and way_belt).
+
+```{r}
+p1 <- ggplot(dsubtrain, aes(x=roll_belt, y=pitch_forearm, colour=classe)) + 
+      geom_point() + theme_minimal() +
+      labs (title = "SubTraining set")
+```
+
+The plot shows that the different classes are classified in different clusters.
+
+## Prediction
+Once we have trained our model(s), we could use them to predict the outcome for the original test set, 
+that have  still not been used.
+
+```{r}
+predictionBoost <- predict(modelBoost, dtest0)
+predictionForest <- predict(modelForest, dtest0)
+prediction <- data.frame(id=dtest0$problem_id, name=dtest0$user_name, Boosting_classe=predictionBoost,
+                         RForest_classe=predictionForest)
+prediction
+```
+
+## Conclusions
+
+From an original data set with 19622 observations and 159 variables, two predictive models have been 
+implemented to predict the manner in which a subject was peforming an exercise. By machine learning 
+algorithms, two different methods (boosting and random forests) have been used to train the models,
+using 54 different predictors.
+
+The obtained out-sample error for both predictive models have been greater than 0.99, confirming that
+both models estimate the *classe* of the excercise really well. The error matrix from the test data set
+can be seen in the following tables.
+```{r}
+kable(CMBoost$table, caption = "Boosting method")
+kable(CMForest$table, caption = "Random Forest method")
+```
+
+Finally, both models have been applied to predict the *classe* of an (unused) validation data set,
+showing both identical results as expected.
